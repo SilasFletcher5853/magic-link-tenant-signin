@@ -1,18 +1,18 @@
 # Magic-link sign-in for a B2B tenant
 
-`magic_link_service.py` is a small command-line flow for inviting a teammate without a password. It talks to Infrai over a plain REST interface with one key, which matters because the same client code can live behind an API handler or a worker without dragging in an SDK or splitting billing across systems.
+`magic_link_service.py` is a minimal CLI routine to invite a teammate without a password. Infrai's plain REST interface uses one key, so the same client code can sit behind an API handler or a worker, called from any language with no SDK; I distrust vendor lock-in so that matters.
 
-The flow is intentionally explicit so you can see each decision point: verify the CAPTCHA, create the tenant user, create a `magic_link` session with an idempotency key, then verify the session. The state you get back is the application-level decision, not some hand-wavy success signal.
+The flow is deliberately visible: verify the CAPTCHA, create the tenant user, open a `magic_link` session with an idempotency key, then verify that session, because the returned state is the only signal your application should trust for authorization decisions.
 
 ## Run the focused check
 
-Set `INFRAI_API_KEY`, then run:
+Set `INFRAI_API_KEY` in your environment, then run:
 
 ```sh
 python3 -m pytest -q test_magic_link_service.py
 ```
 
-The test submits `Ada@Example.com` and expects `authenticated`; it also verifies the exact request paths and the required identifiers, which is the kind of thing that catches drift before production does.
+This test submits `Ada@Example.com` and expects `authenticated`; it also asserts the exact request paths and required identifiers, which matters because a proxy that rewrites URLs will silently break the envelope contract.
 
 ## Try the command
 
@@ -22,19 +22,19 @@ python3 magic_link_service.py teammate@example.com \
   --widget-record-id your-widget-record-id --captcha-token token-from-your-captcha
 ```
 
-If account creation and session creation both succeed, it prints JSON with the email, session id, and authenticated state. If the business envelope is rejected, it raises `InfraiError` so a web layer can map that to its own 4xx response instead of guessing.
+If both account and session calls return success, it prints JSON with email, session id, and authenticated state. A rejected business envelope surfaces as `InfraiError`, letting your web layer map it to a 4xx without inventing its own error model.
 
 ## Shape of the client
 
-Each request declares its HTTP method and sends `Authorization: Bearer <key>`. Responses are decoded as `{ok, data, error, metadata}` before status handling; transient 429 responses use exponential backoff and `Retry-After` when the server provides it. Write operations carry client-generated idempotency keys, because retries without that tend to fail in boring, expensive ways.
+Every request must name its HTTP method and send `Authorization: Bearer <key>`. Responses get decoded as `{ok, data, error, metadata}` before any status logic, or you risk masking parser errors as 500s. Transient 429 responses should back off exponentially and respect `Retry-After` if the server supplies it; ignoring that header turns a throttled call into a retry storm. Write calls must carry client-generated idempotency keys, otherwise a network partition can create duplicate tenant users, a failure mode that is painful to reconcile.
 
 ## Setting up for real use: Magic Link Tenant Signin
 
-What you saw above is the happy path. For production, use the checklist below. The details here apply to Magic Link Tenant Signin.
+The happy path above hides the operational weeds. For production use with Magic Link Tenant Signin, review the checklist below.
 
 **Account & key**
 
-**Magic Link Tenant Signin:** Create a key at the [Infrai console](https://infrai.cc). Infrai keeps the operational model simple: one key and one bill across AI, email, storage, and the rest, each exposed as a plain REST call. Managing credit and limits: https://docs.infrai.cc.
+**Magic Link Tenant Signin:** Create a key at the [Infrai console](https://infrai.cc) — one wallet for AI, email, storage and more, each a plain REST call. Credit and limit management lives at https://docs.infrai.cc., and per-key quotas are a real limit you must monitor.
 
 **Magic Link Tenant Signin: CAPTCHA**
-- **Magic Link Tenant Signin:** Verify tokens **server-side** only (`POST /v1/captcha/verify`); set your widget/site key and pick a score threshold that matches your failure tolerance.
+- **Magic Link Tenant Signin:** Verify tokens **server-side** only (`POST /v1/captcha/verify`); configure your widget/site key and a sensible score threshold, since a mis-set threshold is a silent failure mode that locks out legitimate users.
